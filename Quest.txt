@@ -1,0 +1,288 @@
+import logging
+import asyncio
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+
+# === Настройки ===
+TELEGRAM_BOT_TOKEN = '7902868222:AAH-j4v5QBWlR3svlXTAze4EqX0PU2yZzXo'  # Замените на ваш токен
+
+# === Логирование ===
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+
+# === Описание локаций и действий ===
+LOCATIONS = {
+    "home": {
+        "name": "🏠 Дом",
+        "description": "Вы в своём уютном доме. За окном темнеет.",
+        "actions": ["🌲 Пойти в лес", "🛏 Отдохнуть"]
+    },
+    "forest": {
+        "name": "🌲 Лес",
+        "description": "Вы входите в лес. Кругом тишина. Вы видите старый дуб и тропинку вглубь леса.",
+        "actions": ["🪓 Срубить дуб", "👣 Пойти дальше", "🏠 Вернуться домой"]
+    }
+}
+
+# === Характеристики монстра ===
+MONSTER = {
+    "name": "🧟‍♂️ Зомби",
+    "hp": 30,
+    "attack": 10
+}
+
+# === Установка начального состояния персонажа и инвентаря ===
+def init_user_data(context: ContextTypes.DEFAULT_TYPE):
+    if 'hp' not in context.user_data:
+        context.user_data['hp'] = 100
+    if 'stamina' not in context.user_data:
+        context.user_data['stamina'] = 50
+    if 'mana' not in context.user_data:
+        context.user_data['mana'] = 30
+    if 'inventory' not in context.user_data:
+        context.user_data['inventory'] = {}
+    if 'wood' not in context.user_data['inventory']:
+        context.user_data['inventory']['wood'] = 0  # Начальное количество дров
+    if 'in_combat' not in context.user_data:
+        context.user_data['in_combat'] = False
+
+# === Главное меню с кнопками и статусом персонажа ===
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    init_user_data(context)
+    hp = context.user_data['hp']
+    stamina = max(context.user_data['stamina'], 0)  # Не меньше 0
+    mana = context.user_data['mana']
+
+    status_text = (
+        "👤 Состояние персонажа:\n"
+        f"❤️ HP: {hp}\n"
+        f"🏃 Stamina: {stamina}\n"
+        f"🔮 Mana: {mana}\n\n"
+        "Выберите действие:"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("🗺 Перейти к локациям", callback_data='show_locations')],
+        [InlineKeyboardButton("🎒 Инвентарь", callback_data='show_inventory')],
+        [InlineKeyboardButton("❓ Помощь", callback_data='show_help')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text=status_text, reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(text=status_text, reply_markup=reply_markup)
+
+# === Обработчик команды /start ===
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Добро пожаловать в квест!")
+    await show_main_menu(update, context)
+
+# === Показ списка локаций ===
+async def show_locations(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    keyboard = [
+        [InlineKeyboardButton(loc["name"], callback_data=f"location_{key}")]
+        for key, loc in LOCATIONS.items()
+    ]
+    keyboard.append([InlineKeyboardButton("⬅️ Назад в меню", callback_data="back_to_menu")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text("Выберите локацию:", reply_markup=reply_markup)
+
+# === Вспомогательная функция для открытия локации напрямую ===
+async def handle_location_choice_direct(update: Update, context: ContextTypes.DEFAULT_TYPE, location_key: str):
+    location = LOCATIONS.get(location_key)
+
+    if location:
+        actions_buttons = [[InlineKeyboardButton(action, callback_data=f"action_{action}_{location_key}")] for action in location["actions"]]
+        back_button = [InlineKeyboardButton("⬅️ Назад к локациям", callback_data="show_locations")]
+        reply_markup = InlineKeyboardMarkup(actions_buttons + [back_button])
+
+        text = f"{location['description']}\n\nЧто вы будете делать?"
+        await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup)
+
+# === Показ информации о локации и её действиях (через кнопки) ===
+async def handle_location_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    location_key = query.data.replace("location_", "")
+    return await handle_location_choice_direct(update, context, location_key)
+
+# === Обработка действий в локации ===
+async def handle_action_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data.replace("action_", "").split("_", 1)
+    action = data[0]
+    location_key = data[1]
+
+    responses = {
+        "🪓 Срубить дуб": "Вы срубили дуб. Получено: 🪵 +5 дров.",
+        " bfd Отдохнуть": "Вы немного восстановили силы."
+    }
+
+    response_text = responses.get(action, "Ничего не произошло.")
+
+    # --- ВОССТАНОВЛЕНИЕ HP И STAMINA ---
+    if action == " bfd Отдохнуть":
+        context.user_data['hp'] += 10
+        context.user_data['stamina'] += 10
+        context.user_data['hp'] = min(context.user_data['hp'], 100)  # Макс HP = 100
+        context.user_data['stamina'] = min(context.user_data['stamina'], 50)  # Макс Stamina = 50
+        response_text = "Вы отдохнули!\n❤️ HP: +10\n🏃 Stamina: +10"
+
+    # --- РУБКА ДУБА С ПРОВЕРКОЙ СТАМИНЫ ---
+    elif action == "🪓 Срубить дуб":
+        cost = 5
+        if context.user_data['stamina'] >= cost:
+            context.user_data['stamina'] -= cost
+            context.user_data['inventory']['wood'] += 5
+            response_text = "Вы срубили дуб. Получено: 🪵 +5 дров."
+        else:
+            response_text = "⚠️ Недостаточно stamina для этого действия!"
+
+    # --- ВОЗВРАЩЕНИЕ ДОМОЙ ---
+    elif action == "🏠 Вернуться домой":
+        return await handle_location_choice_direct(update, context, 'home')
+
+    # --- ПЕРЕХОД В БОЙ С МОНСТРОМ ---
+    elif action == "👣 Пойти дальше":
+        context.user_data['monster'] = MONSTER.copy()
+        context.user_data['in_combat'] = True
+        return await handle_combat(update, context, location_key)
+
+    # --- ПЕРЕХОД В ЛЕС ---
+    elif action == "🌲 Пойти в лес":
+        return await handle_location_choice_direct(update, context, 'forest')
+
+    # --- ОТДЫХ В ДОМЕ ---
+    back_button = [InlineKeyboardButton("⬅️ Назад", callback_data=f"location_{location_key}")]
+    reply_markup = InlineKeyboardMarkup([back_button])
+
+    await query.edit_message_text(text=response_text, reply_markup=reply_markup)
+
+# === Отображение боя с монстром ===
+async def handle_combat(update: Update, context: ContextTypes.DEFAULT_TYPE, location_key: str):
+    query = update.callback_query
+    monster = context.user_data.get('monster', None)
+
+    if not monster:
+        await query.edit_message_text("Ошибка: монстр не найден.")
+        return
+
+    keyboard = [[InlineKeyboardButton("⚔️ Атаковать", callback_data=f"combat_attack_{location_key}")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    text = f"💥 Вы встретили: {monster['name']}!\n❤️ HP монстра: {monster['hp']}"
+    await query.edit_message_text(text=text, reply_markup=reply_markup)
+
+# === Обработка атаки в бою ===
+async def handle_combat_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data.replace("combat_attack_", "").split("_", 1)
+    location_key = data[0]
+
+    player_damage = 20  # Наносим фиксированный урон
+    monster = context.user_data.get('monster')
+    if not monster:
+        await query.edit_message_text("Ошибка: монстр исчез.")
+        return
+
+    monster['hp'] -= player_damage
+    if monster['hp'] <= 0:
+        # --- Монстр побеждён ---
+        log_text = f"💀 Вы победили {monster['name']}!"
+        keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data=f"location_{location_key}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        del context.user_data['monster']
+        context.user_data['in_combat'] = False
+    else:
+        # --- Монстр контратакует ---
+        player_hp = context.user_data['hp']
+        player_hp -= monster['attack']
+        context.user_data['hp'] = max(player_hp, 0)
+        log_text = f"⚔️ Вы нанесли {player_damage} урона.\n💔 {monster['name']} ударил в ответ ({monster['attack']} урона)"
+        keyboard = [[InlineKeyboardButton("⚔️ Продолжить бой", callback_data=f"combat_attack_{location_key}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(text=log_text, reply_markup=reply_markup)
+
+# === Отображение инвентаря с кнопкой "Назад" ===
+async def show_inventory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    wood = context.user_data['inventory'].get('wood', 0)
+
+    items_list = ""
+    if wood > 0:
+        items_list += f"- 🪵 Дрова: {wood}\n"
+
+    if not items_list:
+        text = "🎒 Ваш инвентарь пуст."
+    else:
+        text = f"🎒 Ваш инвентарь:\n{items_list}"
+
+    keyboard = [[InlineKeyboardButton("⬅️ Назад в меню", callback_data="back_to_menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(text=text, reply_markup=reply_markup)
+
+# === Отображение помощи с кнопкой "Назад" ===
+async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    help_text = (
+        "❓ Помощь:\n\n"
+        "Используйте кнопки для навигации по игре.\n"
+        "- В главном меню выбирайте локации или проверяйте инвентарь.\n"
+        "- В локациях выполняйте действия.\n"
+        "- Однажды вас ждет бой..."
+    )
+    keyboard = [[InlineKeyboardButton("⬅️ Назад в меню", callback_data="back_to_menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(text=help_text, reply_markup=reply_markup)
+
+# === Обработчик кнопок ===
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data
+
+    if data == "show_locations":
+        await show_locations(update, context)
+
+    elif data.startswith("location_"):
+        await handle_location_choice(update, context)
+
+    elif data.startswith("combat_attack_"):
+        await handle_combat_attack(update, context)
+
+    elif data.startswith("action_"):
+        await handle_action_choice(update, context)
+
+    elif data == "back_to_menu":
+        await show_main_menu(update, context)
+
+    elif data == "show_inventory":
+        await show_inventory(update, context)
+
+    elif data == "show_help":
+        await show_help(update, context)
+
+# === Основная функция запуска бота ===
+async def main():
+    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler))
+
+    print("Бот запущен...")
+
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+
+    while True:
+        await asyncio.sleep(1)
+
+# Точка входа
+if __name__ == '__main__':
+    asyncio.run(main())
